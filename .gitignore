@@ -1,0 +1,10 @@
+node_modules
+dist
+.env
+.env.local
+coverage
+uploads
+*.log
+*.tar.gz
+google-cloud-deploy/
+.DS_Store
