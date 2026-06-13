@@ -4,6 +4,7 @@ import CodeMirror from '@uiw/react-codemirror';
 import { python } from '@codemirror/lang-python';
 import { ArrowLeft, Lightbulb, PartyPopper, Play, RotateCcw, Send, Sparkles, SunMoon, Wand2 } from 'lucide-react';
 import { api } from '../lib/api';
+import { ProctoringWarning, WebcamMonitor, useProctoring, useStoredMockAttempt } from '../components/Proctoring';
 
 type SubmitMood = 'success' | 'retry' | null;
 
@@ -26,6 +27,22 @@ export default function CodingRoom() {
   const [helpError, setHelpError] = useState('');
   const extensions = useMemo(() => [python()], []);
   const draftKey = id ? `questionDraft:${id}` : '';
+  const mockAttempt = useStoredMockAttempt();
+  const proctoring = useProctoring({
+    attempt: mockAttempt,
+    enabled: Boolean(mockAttempt),
+    onAutoSubmit: async (reason) => {
+      if (!mockAttempt?.attemptId) return;
+      const response = await api(`/mock-attempts/${mockAttempt.attemptId}/submit`, {
+        method: 'POST',
+        body: JSON.stringify({ autoSubmitted: true, cheatingSuspected: true, cheatingReason: reason })
+      });
+      localStorage.setItem('latestMockResult', JSON.stringify(response));
+      localStorage.removeItem('activeMockAttempt');
+      window.dispatchEvent(new Event('pkh-mock-attempt-updated'));
+      window.location.assign('/mock-tests');
+    }
+  });
 
   useEffect(() => {
     setHasActiveMock(Boolean(localStorage.getItem('activeMockAttempt')));
@@ -122,6 +139,8 @@ export default function CodingRoom() {
 
   return (
     <div className="relative grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
+      <ProctoringWarning warning={proctoring.warning} locked={proctoring.locked} />
+      {mockAttempt && <WebcamMonitor enabled={Boolean(mockAttempt.webcamEnabled)} onIssue={proctoring.logViolation} />}
       {submitMood && (
         <div className="pointer-events-none fixed inset-0 z-50 grid place-items-center bg-slate-950/20 px-4 backdrop-blur-sm">
           <div className={`feedback-pop relative w-full max-w-md overflow-hidden rounded-lg border bg-white p-6 text-center shadow-panel ${submitMood === 'success' ? 'border-emerald-200' : 'border-orange-200'}`}>
