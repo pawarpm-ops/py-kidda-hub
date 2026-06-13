@@ -98,8 +98,26 @@ const memoryMockAttempts = new Map<
     started_at: Date;
     ends_at: Date;
     status: 'in_progress' | 'submitted' | 'auto_submitted';
+    violation_count?: number;
+    cheating_suspected?: boolean;
+    cheating_reason?: string | null;
+    device_info?: Record<string, unknown>;
+    webcam_status?: string;
+    reviewed_by_admin?: string | null;
+    admin_remarks?: string | null;
   }
 >();
+type MemoryProctoringViolation = {
+  id: string;
+  attempt_id: string;
+  user_id: string;
+  violation_type: string;
+  violation_message: string;
+  device_info: Record<string, unknown>;
+  webcam_status: string;
+  created_at: Date;
+};
+const memoryProctoringViolations: MemoryProctoringViolation[] = [];
 const memoryFriendRequests: Array<{ id: string; sender_id: string; receiver_id: string; status: 'pending' | 'accepted' | 'rejected'; created_at: Date; responded_at?: Date | null }> = [];
 const memoryFriends: Array<{ user_id: string; friend_id: string; created_at: Date }> = [];
 const memoryPrivateChats: Array<{ id: string; user_one_id: string; user_two_id: string; created_at: Date }> = [];
@@ -391,14 +409,19 @@ function currentStatus(user: { status?: string | null; last_active_at?: Date | s
 
 function progressSummary(userId: string) {
   const own = memorySubmissions.filter((submission) => submission.user_id === userId);
-  const solvedIds = new Set(own.filter((submission) => submission.score === 100).map((submission) => submission.question_id));
-  const totalScore = own.reduce((sum, submission) => {
+  const bestByQuestion = new Map<string, number>();
+  for (const submission of own) {
+    bestByQuestion.set(submission.question_id, Math.max(bestByQuestion.get(submission.question_id) || 0, submission.score));
+  }
+  const bestSubmissions = Array.from(bestByQuestion.entries()).map(([question_id, score]) => ({ question_id, score }));
+  const solvedIds = new Set(bestSubmissions.filter((submission) => submission.score === 100).map((submission) => submission.question_id));
+  const totalScore = bestSubmissions.reduce((sum, submission) => {
     const question = memoryQuestions.find((item) => item.id === submission.question_id);
     return sum + Math.round(((question?.points || 0) * submission.score) / 100);
   }, 0);
   const completedTopics = Array.from(
     new Set(
-      own
+      bestSubmissions
         .filter((submission) => submission.score === 100)
         .map((submission) => memoryQuestions.find((question) => question.id === submission.question_id)?.topic)
         .filter(Boolean)
@@ -1055,13 +1078,13 @@ app.post('/api/auth/reset-password', asyncRoute(async (req, res) => {
 app.get('/api/profile', requireAuth, asyncRoute(async (req, res) => {
   if (await preferMemory()) {
     const own = memorySubmissions.filter((submission) => submission.user_id === req.user!.id);
-    const solved = new Set(own.map((submission) => submission.question_id)).size;
+    const solved = new Set(own.filter((submission) => submission.score === 100).map((submission) => submission.question_id)).size;
     const accuracy = own.length ? Math.round(own.reduce((sum, item) => sum + item.score, 0) / own.length) : 0;
     return res.json({ user: req.user, stats: { attempts: own.length, solved, accuracy } });
   }
   const stats = await query(
     `SELECT count(*)::int AS attempts,
-            count(DISTINCT question_id)::int AS solved,
+            count(DISTINCT CASE WHEN score = 100 THEN question_id END)::int AS solved,
             coalesce(round(avg(score),2),0) AS accuracy
      FROM submissions WHERE user_id=$1`,
     [req.user!.id]
@@ -1229,13 +1252,18 @@ app.get('/api/students/search', requireAuth, asyncRoute(async (req, res) => {
     let progress = null;
     if (person.isProgressPublic) {
       const summary = await query(
-        `SELECT count(DISTINCT CASE WHEN s.score = 100 THEN s.question_id END)::int AS "solvedProblems",
-                coalesce(sum(q.points * s.score / 100),0)::int AS "totalScore",
-                coalesce(array_agg(DISTINCT q.topic) FILTER (WHERE s.score = 100), '{}') AS "completedTopics",
-                max(s.created_at) AS "recentActivity"
-         FROM submissions s
-         JOIN questions q ON q.id=s.question_id
-         WHERE s.user_id=$1`,
+        `WITH best AS (
+           SELECT question_id, max(score) AS score, max(created_at) AS created_at
+           FROM submissions
+           WHERE user_id=$1
+           GROUP BY question_id
+         )
+         SELECT count(DISTINCT CASE WHEN best.score = 100 THEN best.question_id END)::int AS "solvedProblems",
+                coalesce(sum(q.points * best.score / 100),0)::int AS "totalScore",
+                coalesce(array_agg(DISTINCT q.topic) FILTER (WHERE best.score = 100), '{}') AS "completedTopics",
+                max(best.created_at) AS "recentActivity"
+         FROM best
+         JOIN questions q ON q.id=best.question_id`,
         [person.id]
       );
       const data = summary.rows[0];
@@ -1798,7 +1826,7 @@ app.get('/api/questions/:id/help', requireAuth, asyncRoute(async (req, res) => {
 app.get('/api/analytics', requireAuth, asyncRoute(async (req, res) => {
   if (await preferMemory()) {
     const own = memorySubmissions.filter((submission) => submission.user_id === req.user!.id);
-    const solved = new Set(own.map((submission) => submission.question_id)).size;
+    const solved = new Set(own.filter((submission) => submission.score === 100).map((submission) => submission.question_id)).size;
     const accuracy = own.length ? Math.round(own.reduce((sum, item) => sum + item.score, 0) / own.length) : 0;
     const topicMap = new Map<string, { total: number; count: number }>();
     for (const submission of own) {
@@ -1816,7 +1844,7 @@ app.get('/api/analytics', requireAuth, asyncRoute(async (req, res) => {
     });
   }
   const overview = await query(
-    `SELECT count(*)::int attempts, count(DISTINCT question_id)::int solved, coalesce(round(avg(score),2),0) accuracy
+    `SELECT count(*)::int attempts, count(DISTINCT CASE WHEN score = 100 THEN question_id END)::int solved, coalesce(round(avg(score),2),0) accuracy
      FROM submissions WHERE user_id=$1`,
     [req.user!.id]
   );
@@ -1843,9 +1871,14 @@ app.get('/api/leaderboard', requireAuth, asyncRoute(async (req, res) => {
       .filter((user) => scope === 'global' || user.college === req.user!.college)
       .map((user) => {
         const own = memorySubmissions.filter((submission) => submission.user_id === user.id);
-        const solved = new Set(own.map((submission) => submission.question_id)).size;
+        const bestByQuestion = new Map<string, number>();
+        for (const submission of own) {
+          bestByQuestion.set(submission.question_id, Math.max(bestByQuestion.get(submission.question_id) || 0, submission.score));
+        }
+        const bestSubmissions = Array.from(bestByQuestion.entries()).map(([question_id, score]) => ({ question_id, score }));
+        const solved = new Set(bestSubmissions.filter((submission) => submission.score === 100).map((submission) => submission.question_id)).size;
         const accuracy = own.length ? Math.round(own.reduce((sum, item) => sum + item.score, 0) / own.length) : 0;
-        const points = own.reduce((sum, submission) => {
+        const points = bestSubmissions.reduce((sum, submission) => {
           const question = memoryQuestions.find((item) => item.id === submission.question_id);
           return sum + Math.round(((question?.points || 0) * submission.score) / 100);
         }, 0);
@@ -1857,12 +1890,27 @@ app.get('/api/leaderboard', requireAuth, asyncRoute(async (req, res) => {
     return res.json(rows);
   }
   const rows = await query(
-    `SELECT u.name,u.college,count(DISTINCT s.question_id)::int solved, round(avg(s.score),2) accuracy, sum(q.points * s.score / 100)::int points
+    `WITH best AS (
+       SELECT user_id, question_id, max(score) AS score
+       FROM submissions
+       GROUP BY user_id, question_id
+     ),
+     attempt_stats AS (
+       SELECT user_id, round(avg(score),2) AS accuracy
+       FROM submissions
+       GROUP BY user_id
+     )
+     SELECT u.name,
+            u.college,
+            count(DISTINCT CASE WHEN best.score = 100 THEN best.question_id END)::int solved,
+            coalesce(attempt_stats.accuracy,0) accuracy,
+            sum(q.points * best.score / 100)::int points
      FROM users u
-     JOIN submissions s ON s.user_id=u.id
-     JOIN questions q ON q.id=s.question_id
+     JOIN best ON best.user_id=u.id
+     JOIN questions q ON q.id=best.question_id
+     LEFT JOIN attempt_stats ON attempt_stats.user_id=u.id
      WHERE ($1='global' OR u.college=$2)
-     GROUP BY u.id ORDER BY points DESC NULLS LAST LIMIT 50`,
+     GROUP BY u.id, attempt_stats.accuracy ORDER BY points DESC NULLS LAST LIMIT 50`,
     [scope, req.user!.college]
   );
   res.json(rows.rows);
@@ -1920,13 +1968,21 @@ app.post('/api/mock-tests/:id/start', requireAuth, asyncRoute(async (req, res) =
 }));
 
 app.post('/api/mock-attempts/:id/submit', requireAuth, asyncRoute(async (req, res) => {
-  const body = z.object({ autoSubmitted: z.boolean().optional() }).parse(req.body);
+  const body = z.object({
+    autoSubmitted: z.boolean().optional(),
+    cheatingSuspected: z.boolean().optional(),
+    cheatingReason: z.string().max(500).optional()
+  }).parse(req.body);
   const attemptId = String(req.params.id);
   const useMemory = await preferMemory();
   if (useMemory) {
     const attempt = memoryMockAttempts.get(attemptId);
     if (!attempt || attempt.user_id !== req.user!.id) return res.status(404).json({ message: 'Mock attempt not found' });
     attempt.status = body.autoSubmitted ? 'auto_submitted' : 'submitted';
+    if (body.cheatingSuspected) {
+      attempt.cheating_suspected = true;
+      attempt.cheating_reason = body.cheatingReason || attempt.cheating_reason || 'Repeated proctoring rule violations.';
+    }
     const latestByQuestion = attempt.question_ids.map((questionId) => {
       const submissions = memorySubmissions
         .filter((submission) => submission.user_id === req.user!.id && submission.question_id === questionId && submission.created_at >= attempt.started_at)
@@ -1937,10 +1993,13 @@ app.post('/api/mock-attempts/:id/submit', requireAuth, asyncRoute(async (req, re
     const totalScore = latestByQuestion.reduce((sum, item) => sum + item.score, 0);
     const score = latestByQuestion.length ? Math.round(totalScore / latestByQuestion.length) : 0;
     return res.json({
-      status: attempt.status,
+      status: attempt.cheating_suspected ? 'cheating_suspected' : attempt.status,
       score,
       attempted: latestByQuestion.filter((item) => item.attempted).length,
       totalQuestions: latestByQuestion.length,
+      cheatingSuspected: Boolean(attempt.cheating_suspected),
+      cheatingReason: attempt.cheating_reason || null,
+      violationCount: attempt.violation_count || 0,
       results: latestByQuestion
     });
   }
@@ -1960,14 +2019,262 @@ app.post('/api/mock-attempts/:id/submit', requireAuth, asyncRoute(async (req, re
   );
   const totalScore = results.rows.reduce((sum: number, item: any) => sum + Number(item.score), 0);
   const score = results.rows.length ? Math.round(totalScore / results.rows.length) : 0;
-  await query('UPDATE mock_attempts SET submitted_at=now(), status=$1, score=$2 WHERE id=$3', [body.autoSubmitted ? 'auto_submitted' : 'submitted', score, attempt.id]);
+  const reason = body.cheatingReason || 'Repeated proctoring rule violations.';
+  const updated = await query(
+    `UPDATE mock_attempts
+     SET submitted_at=now(),
+         status=$1,
+         score=$2,
+         cheating_suspected=cheating_suspected OR $3,
+         cheating_reason=CASE WHEN $3 THEN coalesce(cheating_reason, $4) ELSE cheating_reason END
+     WHERE id=$5
+     RETURNING cheating_suspected, cheating_reason, violation_count`,
+    [body.autoSubmitted ? 'auto_submitted' : 'submitted', score, Boolean(body.cheatingSuspected), reason, attempt.id]
+  );
+  const updatedAttempt = updated.rows[0];
   res.json({
-    status: body.autoSubmitted ? 'auto_submitted' : 'submitted',
+    status: updatedAttempt?.cheating_suspected ? 'cheating_suspected' : body.autoSubmitted ? 'auto_submitted' : 'submitted',
     score,
     attempted: results.rows.filter((item: any) => item.attempted).length,
     totalQuestions: results.rows.length,
+    cheatingSuspected: Boolean(updatedAttempt?.cheating_suspected),
+    cheatingReason: updatedAttempt?.cheating_reason || null,
+    violationCount: Number(updatedAttempt?.violation_count || 0),
     results: results.rows
   });
+}));
+
+const proctoringViolationSchema = z.object({
+  type: z.string().min(2).max(80),
+  message: z.string().min(2).max(500),
+  deviceInfo: z.record(z.unknown()).optional(),
+  webcamStatus: z.string().max(80).optional()
+});
+
+function proctoringAutoSubmitReason(type: string) {
+  return `Automatically submitted after repeated proctoring rule violations. Latest violation: ${type}.`;
+}
+
+app.post('/api/mock-attempts/:id/violations', requireAuth, asyncRoute(async (req, res) => {
+  const body = proctoringViolationSchema.parse(req.body);
+  const attemptId = String(req.params.id);
+  const deviceInfo = body.deviceInfo || {};
+  const webcamStatus = body.webcamStatus || 'not_required';
+
+  if (await preferMemory()) {
+    const attempt = memoryMockAttempts.get(attemptId);
+    if (!attempt || attempt.user_id !== req.user!.id) return res.status(404).json({ message: 'Mock attempt not found' });
+    const violation = {
+      id: randomUUID(),
+      attempt_id: attempt.id,
+      user_id: req.user!.id,
+      violation_type: body.type,
+      violation_message: body.message,
+      device_info: deviceInfo,
+      webcam_status: webcamStatus,
+      created_at: new Date()
+    };
+    memoryProctoringViolations.push(violation);
+    attempt.violation_count = (attempt.violation_count || 0) + 1;
+    attempt.device_info = deviceInfo;
+    attempt.webcam_status = webcamStatus;
+    const autoSubmit = attempt.violation_count >= 3;
+    if (autoSubmit) {
+      attempt.status = 'auto_submitted';
+      attempt.cheating_suspected = true;
+      attempt.cheating_reason = proctoringAutoSubmitReason(body.type);
+    }
+    return res.status(201).json({
+      violationCount: attempt.violation_count,
+      warningsLeft: Math.max(0, 3 - attempt.violation_count),
+      autoSubmit,
+      cheatingSuspected: Boolean(attempt.cheating_suspected),
+      reason: attempt.cheating_reason || null,
+      violation
+    });
+  }
+
+  const attemptResult = await query('SELECT * FROM mock_attempts WHERE id=$1 AND user_id=$2', [attemptId, req.user!.id]);
+  const attempt = attemptResult.rows[0];
+  if (!attempt) return res.status(404).json({ message: 'Mock attempt not found' });
+  const violation = await query(
+    `INSERT INTO mock_proctoring_violations (attempt_id,user_id,violation_type,violation_message,device_info,webcam_status)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     RETURNING *`,
+    [attempt.id, req.user!.id, body.type, body.message, JSON.stringify(deviceInfo), webcamStatus]
+  );
+  const countResult = await query('SELECT count(*)::int AS count FROM mock_proctoring_violations WHERE attempt_id=$1', [attempt.id]);
+  const violationCount = Number(countResult.rows[0]?.count || 0);
+  const autoSubmit = violationCount >= 3;
+  const reason = autoSubmit ? proctoringAutoSubmitReason(body.type) : null;
+  await query(
+    `UPDATE mock_attempts
+     SET violation_count=$1,
+         device_info=$2,
+         webcam_status=$3,
+         status=CASE WHEN $4 THEN 'auto_submitted' ELSE status END,
+         cheating_suspected=cheating_suspected OR $4,
+         cheating_reason=CASE WHEN $4 THEN coalesce(cheating_reason, $5) ELSE cheating_reason END
+     WHERE id=$6`,
+    [violationCount, JSON.stringify(deviceInfo), webcamStatus, autoSubmit, reason, attempt.id]
+  );
+  res.status(201).json({
+    violationCount,
+    warningsLeft: Math.max(0, 3 - violationCount),
+    autoSubmit,
+    cheatingSuspected: autoSubmit,
+    reason,
+    violation: violation.rows[0]
+  });
+}));
+
+app.get('/api/admin/cheating-reports', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  const filters = {
+    test: String(req.query.test || ''),
+    student: String(req.query.student || '').toLowerCase(),
+    suspicious: String(req.query.suspicious || ''),
+    format: String(req.query.format || '')
+  };
+
+  if (await preferMemory()) {
+    const rows = Array.from(memoryMockAttempts.values())
+      .map((attempt) => {
+        const user = memoryUsers.find((item) => item.id === attempt.user_id);
+        const test = memoryMockTests.find((item) => item.id === attempt.mock_test_id);
+        const violations = memoryProctoringViolations.filter((item) => item.attempt_id === attempt.id);
+        return {
+          attemptId: attempt.id,
+          userId: attempt.user_id,
+          studentName: user?.name || 'Unknown student',
+          studentEmail: user?.email || '',
+          testId: attempt.mock_test_id,
+          testName: test?.title || 'Mock Test',
+          startedAt: attempt.started_at,
+          submittedAt: null,
+          finalScore: 0,
+          status: attempt.cheating_suspected ? 'Suspicious' : attempt.status === 'auto_submitted' ? 'Auto-submitted' : 'Normal',
+          violationCount: attempt.violation_count || violations.length,
+          violationTypes: Array.from(new Set(violations.map((item) => item.violation_type))),
+          violations,
+          autoSubmitted: attempt.status === 'auto_submitted',
+          cheatingSuspected: Boolean(attempt.cheating_suspected),
+          cheatingReason: attempt.cheating_reason || null,
+          deviceInfo: attempt.device_info || {},
+          webcamStatus: attempt.webcam_status || 'not_required',
+          reviewedByAdmin: attempt.reviewed_by_admin || null,
+          adminRemarks: attempt.admin_remarks || ''
+        };
+      })
+      .filter((row) => row.violationCount > 0 || row.cheatingSuspected)
+      .filter((row) => !filters.test || row.testId === filters.test || row.testName.toLowerCase().includes(filters.test.toLowerCase()))
+      .filter((row) => !filters.student || row.studentName.toLowerCase().includes(filters.student) || row.studentEmail.toLowerCase().includes(filters.student))
+      .filter((row) => filters.suspicious !== 'true' || row.cheatingSuspected || row.autoSubmitted)
+      .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+    if (filters.format === 'csv') {
+      const csv = ['Student,Email,Test,Attempt ID,Violations,Status,Reason']
+        .concat(rows.map((row) => [row.studentName, row.studentEmail, row.testName, row.attemptId, row.violationCount, row.status, row.cheatingReason || ''].map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')))
+        .join('\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="cheating-reports.csv"');
+      return res.send(csv);
+    }
+    return res.json(rows);
+  }
+
+  const params: unknown[] = [];
+  const conditions: string[] = ['coalesce(ma.violation_count,0) > 0 OR ma.cheating_suspected = true'];
+  if (filters.test) {
+    params.push(`%${filters.test}%`);
+    conditions.push(`(mt.title ILIKE $${params.length} OR mt.id::text ILIKE $${params.length})`);
+  }
+  if (filters.student) {
+    params.push(`%${filters.student}%`);
+    conditions.push(`(lower(u.name) LIKE $${params.length} OR lower(u.email) LIKE $${params.length})`);
+  }
+  if (filters.suspicious === 'true') conditions.push('(ma.cheating_suspected = true OR ma.status = \'auto_submitted\')');
+
+  const rows = await query(
+    `SELECT ma.id AS "attemptId",
+            u.id AS "userId",
+            u.name AS "studentName",
+            u.email AS "studentEmail",
+            mt.id AS "testId",
+            mt.title AS "testName",
+            ma.started_at AS "startedAt",
+            ma.submitted_at AS "submittedAt",
+            ma.score AS "finalScore",
+            CASE
+              WHEN ma.cheating_suspected THEN 'Suspicious'
+              WHEN ma.status='auto_submitted' THEN 'Auto-submitted'
+              ELSE 'Normal'
+            END AS status,
+            coalesce(ma.violation_count,0)::int AS "violationCount",
+            coalesce(array_agg(DISTINCT mpv.violation_type) FILTER (WHERE mpv.id IS NOT NULL), '{}') AS "violationTypes",
+            coalesce(json_agg(json_build_object(
+              'id', mpv.id,
+              'type', mpv.violation_type,
+              'message', mpv.violation_message,
+              'timestamp', mpv.created_at,
+              'deviceInfo', mpv.device_info,
+              'webcamStatus', mpv.webcam_status
+            ) ORDER BY mpv.created_at) FILTER (WHERE mpv.id IS NOT NULL), '[]') AS violations,
+            ma.status='auto_submitted' AS "autoSubmitted",
+            ma.cheating_suspected AS "cheatingSuspected",
+            ma.cheating_reason AS "cheatingReason",
+            ma.device_info AS "deviceInfo",
+            ma.webcam_status AS "webcamStatus",
+            ma.reviewed_by_admin AS "reviewedByAdmin",
+            ma.admin_remarks AS "adminRemarks"
+     FROM mock_attempts ma
+     JOIN users u ON u.id=ma.user_id
+     JOIN mock_tests mt ON mt.id=ma.mock_test_id
+     LEFT JOIN mock_proctoring_violations mpv ON mpv.attempt_id=ma.id
+     WHERE ${conditions.join(' AND ')}
+     GROUP BY ma.id, u.id, mt.id
+     ORDER BY ma.started_at DESC`,
+    params
+  );
+
+  if (filters.format === 'csv') {
+    const csv = ['Student,Email,Test,Attempt ID,Violations,Status,Reason']
+      .concat(rows.rows.map((row: any) => [row.studentName, row.studentEmail, row.testName, row.attemptId, row.violationCount, row.status, row.cheatingReason || ''].map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')))
+      .join('\n');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="cheating-reports.csv"');
+    return res.send(csv);
+  }
+
+  res.json(rows.rows);
+}));
+
+app.patch('/api/admin/cheating-reports/:attemptId', requireAuth, requireAdmin, asyncRoute(async (req, res) => {
+  const attemptId = routeParam(req.params.attemptId);
+  const body = z.object({
+    adminRemarks: z.string().max(1000).optional(),
+    cheatingSuspected: z.boolean().optional()
+  }).parse(req.body);
+
+  if (await preferMemory()) {
+    const attempt = memoryMockAttempts.get(attemptId);
+    if (!attempt) return res.status(404).json({ message: 'Attempt not found' });
+    attempt.reviewed_by_admin = req.user!.id;
+    attempt.admin_remarks = body.adminRemarks || '';
+    if (typeof body.cheatingSuspected === 'boolean') attempt.cheating_suspected = body.cheatingSuspected;
+    return res.json({ ok: true });
+  }
+
+  const result = await query(
+    `UPDATE mock_attempts
+     SET reviewed_by_admin=$1,
+         admin_remarks=$2,
+         cheating_suspected=coalesce($3, cheating_suspected)
+     WHERE id=$4
+     RETURNING id`,
+    [req.user!.id, body.adminRemarks || '', typeof body.cheatingSuspected === 'boolean' ? body.cheatingSuspected : null, attemptId]
+  );
+  if (!result.rows[0]) return res.status(404).json({ message: 'Attempt not found' });
+  res.json({ ok: true });
 }));
 
 app.get('/api/reports', requireAuth, asyncRoute(async (req, res) => {
