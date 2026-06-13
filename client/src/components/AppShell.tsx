@@ -41,6 +41,15 @@ function profilePromptKey(userId?: string) {
   return userId ? `pkh-profile-create-shown:${userId}` : '';
 }
 
+function getInitialTheme(): 'light' | 'dark' {
+  const saved = localStorage.getItem('pkh-theme');
+  if (saved === 'dark' || saved === 'light') return saved;
+  if (document.documentElement.dataset.theme === 'dark' || document.documentElement.dataset.theme === 'light') {
+    return document.documentElement.dataset.theme;
+  }
+  return document.documentElement.classList.contains('dark') ? 'dark' : 'light';
+}
+
 export default function AppShell() {
   const user = getUser();
   const [showCreditsInfo, setShowCreditsInfo] = useState(false);
@@ -53,12 +62,13 @@ export default function AppShell() {
   const [unreadCount, setUnreadCount] = useState(0);
   const [showNotifications, setShowNotifications] = useState(false);
   const [toast, setToast] = useState<NotificationItem | null>(null);
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => (document.documentElement.classList.contains('dark') ? 'dark' : 'light'));
+  const [theme, setTheme] = useState<'light' | 'dark'>(getInitialTheme);
   const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.dataset.theme = theme;
     localStorage.setItem('pkh-theme', theme);
   }, [theme]);
 
