@@ -49,8 +49,9 @@ export default function Auth() {
   }
 
   useEffect(() => {
-    if (configuredGoogleClientId) return;
-    api<{ googleClientId: string }>('/auth/config').then((config) => setGoogleClientId(config.googleClientId)).catch(() => {});
+    api<{ googleClientId: string }>('/auth/config')
+      .then((config) => setGoogleClientId(config.googleClientId || configuredGoogleClientId))
+      .catch(() => setGoogleClientId(configuredGoogleClientId));
   }, []);
 
   useEffect(() => {
@@ -253,7 +254,7 @@ export default function Auth() {
                   Continue with Google
                 </button>
               )}
-              {!googleClientId && <div className="mt-2 text-xs text-amber-700">Google sign-in needs GOOGLE_CLIENT_ID on the server and VITE_GOOGLE_CLIENT_ID on the client.</div>}
+              {!googleClientId && <div className="mt-2 text-xs text-amber-700">Google sign-in needs GOOGLE_CLIENT_ID in the server or Cloud Run environment.</div>}
               <div className="my-4 flex items-center gap-3 text-xs font-bold uppercase tracking-normal text-slate-400">
                 <div className="h-px flex-1 bg-white/15" /> or use email <div className="h-px flex-1 bg-white/15" />
               </div>
