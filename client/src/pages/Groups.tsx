@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Camera, Crown, Loader2, LogOut, Plus, Save, Send, ShieldMinus, ShieldPlus, Trash2, UserRound, Users } from 'lucide-react';
+import { Camera, Crown, Loader2, LogOut, Plus, Save, Search, Send, ShieldMinus, ShieldPlus, Trash2, UserRound, Users, X } from 'lucide-react';
 import { api, getUser } from '../lib/api';
 
 type Student = { id: string; name: string; profilePictureUrl?: string | null; status?: string; isAdmin?: boolean };
@@ -27,6 +27,7 @@ export default function Groups() {
   const [messages, setMessages] = useState<GroupMessage[]>([]);
   const [message, setMessage] = useState('');
   const [name, setName] = useState('');
+  const [groupSearch, setGroupSearch] = useState('');
   const [picture, setPicture] = useState<{ name: string; type: string; dataUrl: string }>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -116,6 +117,8 @@ export default function Groups() {
   const isAdmin = Boolean(currentMember?.isAdmin || selected?.isCurrentUserAdmin);
   const members = selected?.members || [];
   const inviteable = friends.filter((friend) => !members.some((member) => member.id === friend.id));
+  const groupSearchText = groupSearch.trim().toLowerCase();
+  const matchingGroups = groupSearchText ? groups.filter((group) => group.name.toLowerCase().includes(groupSearchText)) : [];
 
   if (loading) {
     return <div className="panel flex min-h-72 items-center justify-center gap-2 p-6 text-slate-500"><Loader2 className="animate-spin" size={18} /> Loading groups</div>;
@@ -129,6 +132,31 @@ export default function Groups() {
           <p className="mt-1 text-sm text-slate-600">Create study groups and discuss Python doubts with friends.</p>
           <div className="mt-4 space-y-3">
             <input className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder={selected && isAdmin ? 'Edit group name' : 'New group name'} />
+            <div>
+              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                <Search size={17} className="text-slate-400" />
+                <input className="w-full bg-transparent text-sm outline-none" placeholder="Search groups by name" value={groupSearch} onChange={(event) => setGroupSearch(event.target.value)} />
+                {groupSearch && (
+                  <button className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700" type="button" aria-label="Clear group search" onClick={() => setGroupSearch('')}>
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              {groupSearchText && (
+                <div className="mt-2 space-y-2">
+                  {matchingGroups.length === 0 && <div className="rounded-md bg-slate-50 p-3 text-sm text-slate-500">No groups found</div>}
+                  {matchingGroups.map((group) => (
+                    <button key={group.id} className="flex w-full items-center gap-3 rounded-lg border border-slate-200 p-3 text-left hover:bg-slate-50" type="button" onClick={() => { setGroupSearch(''); openGroup(group); }}>
+                      <Avatar src={group.picture_url} name={group.name} size="h-9 w-9" />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-bold">{group.name}</div>
+                        <div className="text-xs text-slate-500">{group.members?.length || group.memberCount || 1} members</div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="flex flex-wrap gap-2">
               <label className="btn btn-soft cursor-pointer">
                 <Camera size={16} />
