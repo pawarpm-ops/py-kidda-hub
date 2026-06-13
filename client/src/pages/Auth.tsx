@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { Chrome, Lock, Mail, ShieldCheck, User } from 'lucide-react';
+import { Chrome, KeyRound, Loader2, Lock, Mail, RotateCcw, ShieldCheck, User } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import SnakeMascot from '../components/SnakeMascot';
 import { api, saveSession } from '../lib/api';
 
 declare global {
@@ -17,30 +18,41 @@ declare global {
 }
 
 const configuredGoogleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
+type Mode = 'login' | 'register' | 'forgot' | 'reset' | 'verify';
 
 export default function Auth() {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<Mode>('login');
   const [googleClientId, setGoogleClientId] = useState(configuredGoogleClientId);
-  const [googleOpen, setGoogleOpen] = useState(false);
   const [form, setForm] = useState({
     name: '',
     email: 'student@example.com',
     password: 'Student@123',
-    college: 'Demo Engineering College'
+    college: 'Demo Engineering College',
+    code: '',
+    newPassword: '',
+    confirmPassword: ''
   });
+  const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [snakeBiting, setSnakeBiting] = useState(false);
   const googleButtonRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
+  function finishLogin(token: string, user: any) {
+    saveSession(token, user);
+    setMessage('Login successful. Opening dashboard...');
+    setSnakeBiting(true);
+    window.setTimeout(() => navigate('/'), window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 150 : 850);
+  }
+
   useEffect(() => {
     if (configuredGoogleClientId) return;
-    api<{ googleClientId: string }>('/auth/config')
-      .then((config) => setGoogleClientId(config.googleClientId))
-      .catch(() => {});
+    api<{ googleClientId: string }>('/auth/config').then((config) => setGoogleClientId(config.googleClientId)).catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (!googleClientId || !googleOpen) return;
+    if (!googleClientId) return;
 
     const renderGoogleButton = () => {
       if (!window.google || !googleButtonRef.current) return;
@@ -48,16 +60,19 @@ export default function Auth() {
         client_id: googleClientId,
         callback: async (response) => {
           setError('');
+          setMessage('');
+          setLoading(true);
           try {
             if (!response.credential) throw new Error('Google did not return a sign-in credential.');
             const result = await api<{ token: string; user: any }>('/auth/google', {
               method: 'POST',
               body: JSON.stringify({ credential: response.credential, college: form.college })
             });
-            saveSession(result.token, result.user);
-            navigate('/');
+            finishLogin(result.token, result.user);
           } catch (err) {
-            setError(err instanceof Error ? err.message : 'Google sign-in failed');
+            setError(err instanceof Error ? err.message : 'Google sign-in failed.');
+          } finally {
+            setLoading(false);
           }
         }
       });
@@ -76,7 +91,6 @@ export default function Auth() {
       renderGoogleButton();
       return;
     }
-
     const script = document.createElement('script');
     script.src = 'https://accounts.google.com/gsi/client';
     script.async = true;
@@ -84,116 +98,238 @@ export default function Auth() {
     script.onload = renderGoogleButton;
     script.onerror = () => setError('Could not load Google sign-in. Check your internet connection.');
     document.head.appendChild(script);
-  }, [form.college, googleClientId, googleOpen, navigate]);
+  }, [form.college, googleClientId, navigate]);
+
+  function switchMode(next: Mode) {
+    setMode(next);
+    setError('');
+    setMessage('');
+  }
 
   async function submitAccount(event: React.FormEvent) {
     event.preventDefault();
     setError('');
+    setMessage('');
+    setLoading(true);
     try {
       const path = mode === 'login' ? '/auth/login' : '/auth/register';
-      const payload = mode === 'login' ? { email: form.email, password: form.password } : form;
-      const result = await api<{ token: string; user: any }>(path, { method: 'POST', body: JSON.stringify(payload) });
-      saveSession(result.token, result.user);
-      navigate('/');
+      const payload = mode === 'login' ? { email: form.email, password: form.password } : { name: form.name, email: form.email, password: form.password, college: form.college };
+      const result = await api<{ token: string; user: any; message?: string; devCode?: string }>(path, { method: 'POST', body: JSON.stringify(payload) });
+      if (mode === 'register') {
+        saveSession(result.token, result.user);
+        setMessage(`${result.message || 'Account created. OTP sent.'}${result.devCode ? ` Development OTP: ${result.devCode}` : ''}`);
+        setMode('verify');
+      } else {
+        finishLogin(result.token, result.user);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : mode === 'login' ? 'Login failed' : 'Registration failed');
+      setError(err instanceof Error ? err.message : mode === 'login' ? 'Login failed.' : 'Registration failed.');
+    } finally {
+      setLoading(false);
     }
   }
 
+  async function sendForgotOtp(event: React.FormEvent) {
+    event.preventDefault();
+    setError('');
+    setMessage('');
+    setLoading(true);
+    try {
+      const result = await api<{ message: string; devCode?: string }>('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email: form.email }) });
+      setMessage(`${result.message}${result.devCode ? ` Development OTP: ${result.devCode}` : ''}`);
+      setMode('reset');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not send password reset code.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function verifyEmail(event: React.FormEvent) {
+    event.preventDefault();
+    setError('');
+    setMessage('');
+    setLoading(true);
+    try {
+      const result = await api<{ message: string }>('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email: form.email, code: form.code, purpose: 'email_verification' }) });
+      setMessage(result.message);
+      window.setTimeout(() => navigate('/'), 450);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid or expired verification code.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function resetPassword(event: React.FormEvent) {
+    event.preventDefault();
+    setError('');
+    setMessage('');
+    setLoading(true);
+    try {
+      const result = await api<{ message: string }>('/auth/reset-password', {
+        method: 'POST',
+        body: JSON.stringify({ email: form.email, code: form.code, newPassword: form.newPassword, confirmPassword: form.confirmPassword })
+      });
+      setMessage(result.message);
+      setMode('login');
+      setForm({ ...form, password: '', code: '', newPassword: '', confirmPassword: '' });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid or expired verification code.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const title =
+    mode === 'login' ? 'Login to your account' :
+    mode === 'register' ? 'Create student account' :
+    mode === 'forgot' ? 'Forgot password' :
+    mode === 'verify' ? 'Verify your email' :
+    'Reset password';
+
   return (
-    <div className="grid min-h-screen bg-slate-950 text-white lg:grid-cols-[1.05fr_0.95fr]">
-      <section className="flex flex-col justify-between bg-[linear-gradient(rgba(15,23,42,.7),rgba(15,23,42,.55)),url('https://images.unsplash.com/photo-1515879218367-8466d910aaa4?auto=format&fit=crop&w=1400&q=80')] bg-cover bg-center p-8">
-        <div className="flex items-center gap-3">
-          <img className="h-12 w-12 rounded-md bg-white object-cover shadow-sm" src="/py-kidda-hub-logo.png" alt="PY Kidda Hub logo" />
-          <div>
-            <div className="text-xl font-bold">PY Kidda Hub(PKH)</div>
-            <div className="text-sm font-semibold text-slate-100">Be a PY kidda with us</div>
-          </div>
-        </div>
-        <div className="max-w-2xl pb-10">
-          <h1 className="text-5xl font-bold leading-tight tracking-normal md:text-6xl">PY Kidda Hub(PKH)</h1>
-          <div className="mt-4 text-2xl font-bold text-yellow-300">Be a PY kidda with us</div>
-          <p className="mt-5 max-w-xl text-lg text-slate-100">Students create their own accounts so practice history, mock tests, and progress stay separate.</p>
-        </div>
-      </section>
-
-      <section className="flex items-center justify-center bg-slate-50 p-6 text-slate-900">
-        <div className="panel w-full max-w-md p-6">
-          <div className="mb-5">
-            <div className="mb-3 inline-flex items-center gap-2 rounded-md bg-blue-50 px-2 py-1 text-xs font-bold text-brand">
-              <ShieldCheck size={15} />
-              Separate student progress
+    <div className="auth-snake-page min-h-screen overflow-hidden text-white">
+      <section className="mx-auto grid min-h-screen w-full max-w-7xl gap-6 px-4 py-5 lg:grid-cols-[1.05fr_0.95fr] lg:px-8 lg:py-8">
+        <div className="relative flex min-h-[360px] flex-col justify-between overflow-hidden rounded-2xl border border-cyan-300/20 bg-slate-950/70 p-6 shadow-[0_24px_80px_rgba(15,23,42,.45)] lg:p-8">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(34,211,238,.18),transparent_32%),radial-gradient(circle_at_82%_28%,rgba(168,85,247,.18),transparent_30%)]" />
+          <div className="relative z-10 flex items-center gap-3">
+            <img className="h-14 w-14 rounded-xl bg-white object-cover shadow-[0_0_28px_rgba(34,211,238,.45)]" src="/py-kidda-hub-logo.png" alt="PY Kidda Hub logo" />
+            <div>
+              <div className="text-xl font-black">PY Kidda Hub(PKH)</div>
+              <div className="text-sm font-semibold text-cyan-100">Be a PY kidda with us</div>
             </div>
-            <h2 className="text-2xl font-bold">{mode === 'login' ? 'Login to your account' : 'Create student account'}</h2>
-            <p className="mt-1 text-sm text-slate-500">Each student should use their own account before practicing or taking tests.</p>
           </div>
-
-          <div className="mb-5 grid grid-cols-2 rounded-md bg-slate-100 p-1">
-            <button type="button" className={`rounded px-3 py-2 text-sm font-bold ${mode === 'login' ? 'bg-white text-brand shadow-sm' : 'text-slate-600'}`} onClick={() => setMode('login')}>
-              Login
-            </button>
-            <button type="button" className={`rounded px-3 py-2 text-sm font-bold ${mode === 'register' ? 'bg-white text-brand shadow-sm' : 'text-slate-600'}`} onClick={() => setMode('register')}>
-              Sign Up
-            </button>
+          <div className="relative z-10 grid items-end gap-5 xl:grid-cols-[0.88fr_1.12fr]">
+            <div className="pb-4">
+              <div className="inline-flex rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">Interactive Python login</div>
+              <h1 className="mt-4 text-4xl font-black leading-tight tracking-normal md:text-6xl">Code. Learn. Achieve.</h1>
+              <p className="mt-4 max-w-md text-base leading-7 text-slate-200">A playful coding gateway with secure Google login, OTP recovery, and your own student progress vault.</p>
+            </div>
+            <SnakeMascot biting={snakeBiting} />
           </div>
+        </div>
 
-          <form onSubmit={submitAccount} className="space-y-3">
-            {mode === 'register' && (
-              <label className="block">
-                <span className="mb-1 flex items-center gap-2 text-sm font-semibold">
-                  <User size={15} /> Full name
-                </span>
-                <input className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
-              </label>
-            )}
-            <label className="block">
-              <span className="mb-1 flex items-center gap-2 text-sm font-semibold">
-                <Mail size={15} /> Email
-              </span>
-              <input className="input" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required />
-            </label>
-            <label className="block">
-              <span className="mb-1 flex items-center gap-2 text-sm font-semibold">
-                <Lock size={15} /> Password
-              </span>
-              <input className="input" type="password" minLength={8} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} required />
-            </label>
-            {mode === 'register' && (
-              <label className="block">
-                <span className="mb-1 text-sm font-semibold">College</span>
-                <input className="input" value={form.college} onChange={(event) => setForm({ ...form, college: event.target.value })} required />
-              </label>
-            )}
-
-            {error && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
-
-            <button className="btn btn-primary w-full" type="submit">
-              {mode === 'login' ? 'Login' : 'Create Account'}
-            </button>
-          </form>
-
-          <div className="mt-5 border-t border-slate-200 pt-4">
-            <button className="flex w-full items-center justify-center gap-2 text-sm font-semibold text-slate-500" type="button" onClick={() => setGoogleOpen(!googleOpen)}>
-              <Chrome size={16} />
-              {googleOpen ? 'Hide Google sign-in' : 'Use Google account'}
-            </button>
-            {googleOpen && (
-              <div className="mt-4">
-                {googleClientId ? (
-                  <div className="flex min-h-11 items-center justify-center rounded-md border border-slate-200 bg-white p-1" ref={googleButtonRef} />
-                ) : (
-                  <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-                    Google sign-in is not configured yet. Students can use email and password accounts now.
-                  </div>
-                )}
+        <section className="flex items-center justify-center">
+          <div className={`auth-card w-full max-w-md p-6 ${snakeBiting ? 'auth-card-success' : ''}`}>
+            <div className="mb-5">
+              <div className="mb-3 inline-flex items-center gap-2 rounded-md border border-cyan-300/30 bg-cyan-300/10 px-2 py-1 text-xs font-bold text-cyan-100">
+                <ShieldCheck size={15} />
+                Secure student access
               </div>
-            )}
-          </div>
+              <h2 className="text-2xl font-black text-white">{title}</h2>
+              <p className="mt-1 text-sm text-slate-300">Use Google or email/password. OTP codes expire in 10 minutes.</p>
+            </div>
 
-          <div className="mt-4 rounded-md bg-slate-50 p-3 text-xs text-slate-500">
+          {(mode === 'login' || mode === 'register') && (
+            <div className="mb-5 grid grid-cols-2 rounded-md bg-white/10 p-1">
+              <button type="button" className={`rounded px-3 py-2 text-sm font-bold ${mode === 'login' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-300'}`} onClick={() => switchMode('login')}>
+                Login
+              </button>
+              <button type="button" className={`rounded px-3 py-2 text-sm font-bold ${mode === 'register' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-300'}`} onClick={() => switchMode('register')}>
+                Sign Up
+              </button>
+            </div>
+          )}
+
+          {(mode === 'login' || mode === 'register') && (
+            <div className="mb-4">
+              {googleClientId ? (
+                <div className="flex min-h-11 items-center justify-center rounded-md border border-slate-200 bg-white p-1" ref={googleButtonRef} />
+              ) : (
+                <button className="btn btn-soft w-full" type="button" disabled>
+                  <Chrome size={16} />
+                  Continue with Google
+                </button>
+              )}
+              {!googleClientId && <div className="mt-2 text-xs text-amber-700">Google sign-in needs GOOGLE_CLIENT_ID on the server and VITE_GOOGLE_CLIENT_ID on the client.</div>}
+              <div className="my-4 flex items-center gap-3 text-xs font-bold uppercase tracking-normal text-slate-400">
+                <div className="h-px flex-1 bg-white/15" /> or use email <div className="h-px flex-1 bg-white/15" />
+              </div>
+            </div>
+          )}
+
+          {(mode === 'login' || mode === 'register') && (
+            <form onSubmit={submitAccount} className="space-y-3">
+              {mode === 'register' && (
+                <label className="block">
+                  <span className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-200"><User size={15} /> Full name</span>
+                  <input className="input" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} required />
+                </label>
+              )}
+              <label className="block">
+                <span className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-200"><Mail size={15} /> Email</span>
+                <input className="input" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required />
+              </label>
+              <label className="block">
+                <span className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-200"><Lock size={15} /> Password</span>
+                <input className="input" type="password" minLength={8} value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} required />
+              </label>
+              {mode === 'register' && (
+                <label className="block">
+                  <span className="mb-1 text-sm font-semibold text-slate-200">College</span>
+                  <input className="input" value={form.college} onChange={(event) => setForm({ ...form, college: event.target.value })} required />
+                </label>
+              )}
+              {mode === 'login' && (
+                <button className="text-sm font-bold text-cyan-200 hover:text-white" type="button" onClick={() => switchMode('forgot')}>
+                  Forgot Password?
+                </button>
+              )}
+              <button className="btn btn-primary w-full" type="submit" disabled={loading}>
+                {loading ? <Loader2 className="animate-spin" size={16} /> : <KeyRound size={16} />}
+                {mode === 'login' ? 'Login' : 'Create Account'}
+              </button>
+            </form>
+          )}
+
+          {mode === 'forgot' && (
+            <form onSubmit={sendForgotOtp} className="space-y-3">
+              <label className="block">
+                <span className="mb-1 flex items-center gap-2 text-sm font-semibold text-slate-200"><Mail size={15} /> Registered email</span>
+                <input className="input" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required />
+              </label>
+              <button className="btn btn-primary w-full" disabled={loading}>
+                {loading ? <Loader2 className="animate-spin" size={16} /> : <RotateCcw size={16} />}
+                Send Reset OTP
+              </button>
+              <button className="btn btn-soft w-full" type="button" onClick={() => switchMode('login')}>Back to Login</button>
+            </form>
+          )}
+
+          {mode === 'verify' && (
+            <form onSubmit={verifyEmail} className="space-y-3">
+              <input className="input" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required />
+              <input className="input" inputMode="numeric" maxLength={6} placeholder="6-digit OTP" value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} required />
+              <button className="btn btn-primary w-full" disabled={loading}>
+                {loading ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
+                Verify Email
+              </button>
+            </form>
+          )}
+
+          {mode === 'reset' && (
+            <form onSubmit={resetPassword} className="space-y-3">
+              <input className="input" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} required />
+              <input className="input" inputMode="numeric" maxLength={6} placeholder="6-digit OTP" value={form.code} onChange={(event) => setForm({ ...form, code: event.target.value })} required />
+              <input className="input" type="password" placeholder="New password" value={form.newPassword} onChange={(event) => setForm({ ...form, newPassword: event.target.value })} required />
+              <input className="input" type="password" placeholder="Confirm password" value={form.confirmPassword} onChange={(event) => setForm({ ...form, confirmPassword: event.target.value })} required />
+              <button className="btn btn-primary w-full" disabled={loading}>
+                {loading ? <Loader2 className="animate-spin" size={16} /> : <Lock size={16} />}
+                Reset Password
+              </button>
+              <button className="btn btn-soft w-full" type="button" onClick={() => switchMode('login')}>Back to Login</button>
+            </form>
+          )}
+
+          {message && <div className="mt-4 rounded-md border border-emerald-300/30 bg-emerald-400/10 px-3 py-2 text-sm text-emerald-100">{message}</div>}
+          {error && <div className="mt-4 rounded-md border border-red-300/30 bg-red-400/10 px-3 py-2 text-sm text-red-100">{error}</div>}
+
+          <div className="mt-4 rounded-md border border-white/10 bg-white/5 p-3 text-xs text-slate-300">
             Admin demo: `admin@example.com` / `Admin@123`
           </div>
         </div>
+      </section>
       </section>
     </div>
   );
