@@ -12,8 +12,8 @@ async function main() {
   const studentHash = await bcrypt.hash('Student@123', 10);
   const adminHash = await bcrypt.hash('Admin@123', 10);
   await query(
-    `INSERT INTO users (name, email, password_hash, college, role)
-     VALUES ($1,$2,$3,$4,$5), ($6,$7,$8,$9,$10)
+    `INSERT INTO users (name, email, password_hash, college, role, email_verified, account_status)
+     VALUES ($1,$2,$3,$4,$5,true,'active'), ($6,$7,$8,$9,$10,true,'active')
      ON CONFLICT (email) DO NOTHING`,
     ['Demo Student', 'student@example.com', studentHash, 'Demo Engineering College', 'student', 'Admin Faculty', 'admin@example.com', adminHash, 'Demo Engineering College', 'admin']
   );
