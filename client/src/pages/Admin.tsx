@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Bell, Download, Edit2, FileText, Plus, RefreshCcw, Send, Trash2 } from 'lucide-react';
-import { api, getUser } from '../lib/api';
+import { AlertTriangle, Bell, Download, Edit2, FileText, Plus, RefreshCcw, Send, ShieldAlert, Trash2 } from 'lucide-react';
+import { api, getToken, getUser } from '../lib/api';
 
 type StudentProgress = {
   id: string;
@@ -61,6 +61,29 @@ type AdminReport = {
   history?: Array<{ id: string; old_status?: string | null; new_status: string; note?: string | null; created_at: string }>;
 };
 
+type CheatingReport = {
+  attemptId: string;
+  userId: string;
+  studentName: string;
+  studentEmail: string;
+  testId: string;
+  testName: string;
+  startedAt: string;
+  submittedAt?: string | null;
+  finalScore: number;
+  status: 'Normal' | 'Suspicious' | 'Auto-submitted';
+  violationCount: number;
+  violationTypes: string[];
+  violations: Array<{ id: string; type?: string; violation_type?: string; message?: string; violation_message?: string; timestamp?: string; created_at?: string; webcamStatus?: string; webcam_status?: string }>;
+  autoSubmitted: boolean;
+  cheatingSuspected: boolean;
+  cheatingReason?: string | null;
+  deviceInfo?: Record<string, unknown>;
+  webcamStatus?: string;
+  reviewedByAdmin?: string | null;
+  adminRemarks?: string | null;
+};
+
 const emptyNotification = {
   title: '',
   message: '',
@@ -79,6 +102,12 @@ export default function Admin() {
   const [report, setReport] = useState<StudentProgress[]>([]);
   const [notifications, setNotifications] = useState<AdminNotification[]>([]);
   const [adminReports, setAdminReports] = useState<AdminReport[]>([]);
+  const [cheatingReports, setCheatingReports] = useState<CheatingReport[]>([]);
+  const [cheatingFilters, setCheatingFilters] = useState({ test: '', student: '', suspicious: 'true' });
+  const [selectedCheatingId, setSelectedCheatingId] = useState('');
+  const [cheatingError, setCheatingError] = useState('');
+  const [cheatingSavingId, setCheatingSavingId] = useState('');
+  const [cheatingDraft, setCheatingDraft] = useState({ adminRemarks: '', cheatingSuspected: true });
   const [reportFilters, setReportFilters] = useState({ status: '', category: '', priority: '', user: '', date: '' });
   const [selectedReportId, setSelectedReportId] = useState('');
   const [reportError, setReportError] = useState('');
@@ -119,6 +148,14 @@ export default function Admin() {
     }).catch((err) => setReportError(err instanceof Error ? err.message : 'Could not load reports.'));
   }
 
+  function loadCheatingReports() {
+    const qs = new URLSearchParams(cheatingFilters).toString();
+    api<CheatingReport[]>(`/admin/cheating-reports?${qs}`).then((rows) => {
+      setCheatingReports(rows);
+      if (!selectedCheatingId && rows[0]) setSelectedCheatingId(rows[0].attemptId);
+    }).catch((err) => setCheatingError(err instanceof Error ? err.message : 'Could not load cheating reports.'));
+  }
+
   useEffect(() => {
     loadQuestions();
     loadProgress();
@@ -128,6 +165,10 @@ export default function Admin() {
   useEffect(() => {
     loadAdminReports();
   }, [reportFilters]);
+
+  useEffect(() => {
+    loadCheatingReports();
+  }, [cheatingFilters]);
 
   if (user?.role !== 'admin') return <div className="panel p-6">Admin access is required.</div>;
 
@@ -188,6 +229,7 @@ export default function Admin() {
   const students = report.filter((row) => row.role === 'student');
   const admins = report.filter((row) => row.role === 'admin');
   const selectedReport = adminReports.find((item) => item.id === selectedReportId) || adminReports[0];
+  const selectedCheatingReport = cheatingReports.find((item) => item.attemptId === selectedCheatingId) || cheatingReports[0];
 
   useEffect(() => {
     if (!selectedReport) return;
@@ -197,6 +239,14 @@ export default function Admin() {
       moderation_action: selectedReport.moderation_action || 'None'
     });
   }, [selectedReport?.id]);
+
+  useEffect(() => {
+    if (!selectedCheatingReport) return;
+    setCheatingDraft({
+      adminRemarks: selectedCheatingReport.adminRemarks || '',
+      cheatingSuspected: selectedCheatingReport.cheatingSuspected
+    });
+  }, [selectedCheatingReport?.attemptId]);
 
   async function updateAdminReport(item: AdminReport, updates: Partial<AdminReport>) {
     setReportSavingId(item.id);
@@ -217,6 +267,37 @@ export default function Admin() {
     } finally {
       setReportSavingId('');
     }
+  }
+
+  async function updateCheatingReport(item: CheatingReport) {
+    setCheatingSavingId(item.attemptId);
+    setCheatingError('');
+    try {
+      await api(`/admin/cheating-reports/${item.attemptId}`, {
+        method: 'PATCH',
+        body: JSON.stringify(cheatingDraft)
+      });
+      loadCheatingReports();
+    } catch (err) {
+      setCheatingError(err instanceof Error ? err.message : 'Could not update cheating report.');
+    } finally {
+      setCheatingSavingId('');
+    }
+  }
+
+  async function downloadCheatingCsv() {
+    const qs = new URLSearchParams({ ...cheatingFilters, format: 'csv' }).toString();
+    const headers = new Headers();
+    const token = getToken();
+    if (token) headers.set('Authorization', `Bearer ${token}`);
+    const response = await fetch(`${import.meta.env.VITE_API_URL || '/api'}/admin/cheating-reports?${qs}`, { headers });
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'cheating-reports.csv';
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -281,6 +362,107 @@ export default function Admin() {
             </div>
           ))}
           {!students.length && <div className="p-4 text-sm text-slate-500">No student activity yet. Student accounts will appear here after sign-up.</div>}
+        </div>
+      </section>
+
+      <section className="panel overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div>
+            <div className="flex items-center gap-2 font-bold"><ShieldAlert size={18} /> Cheating Reports</div>
+            <div className="text-sm text-slate-500">Review mock-test proctoring violations, auto-submissions, device data, and webcam events.</div>
+          </div>
+          <button className="btn btn-soft" onClick={downloadCheatingCsv}>
+            <Download size={16} />
+            Export CSV
+          </button>
+        </div>
+        <div className="grid gap-3 border-b border-slate-200 p-4 md:grid-cols-3">
+          <input className="input" placeholder="Filter by test" value={cheatingFilters.test} onChange={(event) => setCheatingFilters({ ...cheatingFilters, test: event.target.value })} />
+          <input className="input" placeholder="Filter by student" value={cheatingFilters.student} onChange={(event) => setCheatingFilters({ ...cheatingFilters, student: event.target.value })} />
+          <select className="input" value={cheatingFilters.suspicious} onChange={(event) => setCheatingFilters({ ...cheatingFilters, suspicious: event.target.value })}>
+            <option value="true">Suspicious only</option>
+            <option value="">All violation logs</option>
+          </select>
+        </div>
+        {cheatingError && <div className="border-b border-red-100 bg-red-50 px-4 py-2 text-sm text-red-700">{cheatingError}</div>}
+        <div className="grid min-h-[440px] lg:grid-cols-[0.9fr_1.1fr]">
+          <div className="border-r border-slate-200">
+            {cheatingReports.length === 0 && <div className="p-6 text-center text-sm text-slate-500">No cheating/proctoring reports found.</div>}
+            <div className="divide-y divide-slate-100">
+              {cheatingReports.map((item) => (
+                <button key={item.attemptId} type="button" onClick={() => setSelectedCheatingId(item.attemptId)} className={`block w-full p-4 text-left hover:bg-slate-50 ${selectedCheatingReport?.attemptId === item.attemptId ? 'bg-red-50' : ''} ${item.autoSubmitted ? 'border-l-4 border-l-red-500' : ''}`}>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="font-semibold">{item.studentName}</div>
+                    <span className={`rounded px-2 py-0.5 text-xs font-bold ${item.cheatingSuspected ? 'bg-red-100 text-red-700' : 'bg-amber-50 text-amber-700'}`}>{item.status}</span>
+                  </div>
+                  <div className="mt-1 text-sm text-slate-500">{item.testName} · {item.violationCount} violation(s)</div>
+                  <div className="mt-1 text-xs text-slate-400">{new Date(item.startedAt).toLocaleString()}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="p-5">
+            {selectedCheatingReport ? (
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-xl font-bold">{selectedCheatingReport.testName}</h2>
+                    <div className="mt-1 text-sm text-slate-500">{selectedCheatingReport.studentName} · {selectedCheatingReport.studentEmail}</div>
+                    <div className="mt-1 text-xs text-slate-400">Attempt ID: {selectedCheatingReport.attemptId}</div>
+                  </div>
+                  <div className={`rounded px-3 py-2 text-sm font-black ${selectedCheatingReport.autoSubmitted ? 'bg-red-100 text-red-700' : selectedCheatingReport.cheatingSuspected ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                    {selectedCheatingReport.status}
+                  </div>
+                </div>
+                <div className="grid gap-3 text-sm md:grid-cols-3">
+                  <div className="rounded-md bg-slate-50 p-3"><b>Score</b><div>{selectedCheatingReport.finalScore || 0}%</div></div>
+                  <div className="rounded-md bg-slate-50 p-3"><b>Violations</b><div>{selectedCheatingReport.violationCount}</div></div>
+                  <div className="rounded-md bg-slate-50 p-3"><b>Webcam</b><div>{selectedCheatingReport.webcamStatus || 'not_required'}</div></div>
+                </div>
+                {selectedCheatingReport.cheatingReason && (
+                  <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm font-semibold text-red-800">
+                    Reason: {selectedCheatingReport.cheatingReason}
+                  </div>
+                )}
+                <div>
+                  <div className="mb-2 text-sm font-bold">Violation Log</div>
+                  <div className="space-y-2">
+                    {selectedCheatingReport.violations.length === 0 && <div className="rounded-md bg-slate-50 p-3 text-sm text-slate-500">No detailed events stored.</div>}
+                    {selectedCheatingReport.violations.map((event, index) => (
+                      <div key={event.id || index} className="rounded-md border border-slate-200 p-3 text-sm">
+                        <div className="font-bold text-slate-900">{event.type || event.violation_type || 'violation'}</div>
+                        <div className="text-slate-600">{event.message || event.violation_message}</div>
+                        <div className="mt-1 text-xs text-slate-400">{new Date(event.timestamp || event.created_at || selectedCheatingReport.startedAt).toLocaleString()} · Webcam: {event.webcamStatus || event.webcam_status || 'not_required'}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <details className="rounded-md border border-slate-200 p-3 text-sm">
+                  <summary className="cursor-pointer font-bold">Device / browser information</summary>
+                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-50">{JSON.stringify(selectedCheatingReport.deviceInfo || {}, null, 2)}</pre>
+                </details>
+                <div className="grid gap-3 md:grid-cols-[220px_1fr]">
+                  <label className="block">
+                    <span className="mb-1 block text-sm font-bold">Review decision</span>
+                    <select className="input" value={cheatingDraft.cheatingSuspected ? 'suspicious' : 'approved'} onChange={(event) => setCheatingDraft({ ...cheatingDraft, cheatingSuspected: event.target.value === 'suspicious' })}>
+                      <option value="suspicious">Keep suspicious/rejected</option>
+                      <option value="approved">Approve as normal</option>
+                    </select>
+                  </label>
+                  <label className="block">
+                    <span className="mb-1 block text-sm font-bold">Admin remarks</span>
+                    <input className="input" value={cheatingDraft.adminRemarks} onChange={(event) => setCheatingDraft({ ...cheatingDraft, adminRemarks: event.target.value })} placeholder="Add review notes" />
+                  </label>
+                </div>
+                <button className="btn btn-primary" disabled={cheatingSavingId === selectedCheatingReport.attemptId} onClick={() => updateCheatingReport(selectedCheatingReport)}>
+                  <Send size={16} />
+                  {cheatingSavingId === selectedCheatingReport.attemptId ? 'Saving...' : 'Save Review'}
+                </button>
+              </div>
+            ) : (
+              <div className="grid h-full place-items-center text-sm text-slate-500">Select a cheating report to view details.</div>
+            )}
+          </div>
         </div>
       </section>
 
