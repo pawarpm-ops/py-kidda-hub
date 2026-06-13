@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CheckCircle2, Clock, FileText, PlayCircle, Send, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Clock, Download, FileText, PlayCircle, Send, ShieldCheck, XCircle } from 'lucide-react';
 import { api } from '../lib/api';
+import { ProctoringWarning, TestDeclaration, WebcamMonitor, useProctoring } from '../components/Proctoring';
 
 type MockTest = {
   id: string;
@@ -23,6 +24,7 @@ type ActiveAttempt = {
   test: MockTest;
   questions: MockQuestion[];
   endsAt: string;
+  webcamEnabled?: boolean;
 };
 
 type MockResult = {
@@ -30,10 +32,14 @@ type MockResult = {
   score: number;
   attempted: number;
   totalQuestions: number;
+  cheatingSuspected?: boolean;
+  cheatingReason?: string | null;
+  violationCount?: number;
   results: Array<{ questionId: string; title: string; score: number; attempted: boolean }>;
 };
 
 const ACTIVE_MOCK_ATTEMPT_KEY = 'activeMockAttempt';
+const LATEST_MOCK_RESULT_KEY = 'latestMockResult';
 
 function formatTime(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
@@ -48,9 +54,29 @@ export default function MockTests() {
   const [timer, setTimer] = useState(0);
   const [error, setError] = useState('');
   const [loadingId, setLoadingId] = useState('');
+  const [pendingTest, setPendingTest] = useState<MockTest | null>(null);
+  const [declarationAccepted, setDeclarationAccepted] = useState(false);
+  const [webcamEnabled, setWebcamEnabled] = useState(false);
   const submittedRef = useRef(false);
+  const activeWithWebcam = active ? { ...active, webcamEnabled: Boolean(active.webcamEnabled) } : null;
+  const proctoring = useProctoring({
+    attempt: activeWithWebcam,
+    enabled: Boolean(active && !result),
+    onAutoSubmit: async (reason) => {
+      await submitAttempt(true, reason);
+    }
+  });
 
   useEffect(() => {
+    const latest = localStorage.getItem(LATEST_MOCK_RESULT_KEY);
+    if (latest) {
+      try {
+        setResult(JSON.parse(latest));
+      } catch {
+        // Ignore broken local backup.
+      }
+      localStorage.removeItem(LATEST_MOCK_RESULT_KEY);
+    }
     const stored = localStorage.getItem(ACTIVE_MOCK_ATTEMPT_KEY);
     if (!stored) return;
     try {
@@ -84,15 +110,25 @@ export default function MockTests() {
     return () => window.clearInterval(id);
   }, [active, result]);
 
+  function requestStart(test: MockTest) {
+    setPendingTest(test);
+    setDeclarationAccepted(false);
+    setWebcamEnabled(false);
+  }
+
   async function startTest(test: MockTest) {
     setError('');
     setResult(null);
     setLoadingId(test.id);
     submittedRef.current = false;
     try {
+      await document.documentElement.requestFullscreen?.().catch(() => {});
       const attempt = await api<ActiveAttempt>(`/mock-tests/${test.id}/start`, { method: 'POST', body: JSON.stringify({}) });
-      setActive(attempt);
-      localStorage.setItem(ACTIVE_MOCK_ATTEMPT_KEY, JSON.stringify(attempt));
+      const attemptWithSettings = { ...attempt, webcamEnabled };
+      setActive(attemptWithSettings);
+      setPendingTest(null);
+      localStorage.setItem(ACTIVE_MOCK_ATTEMPT_KEY, JSON.stringify(attemptWithSettings));
+      window.dispatchEvent(new Event('pkh-mock-attempt-updated'));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start mock test');
     } finally {
@@ -100,18 +136,24 @@ export default function MockTests() {
     }
   }
 
-  async function submitAttempt(autoSubmitted = false) {
+  async function submitAttempt(autoSubmitted = false, cheatingReason = '') {
     if (!active) return;
     setError('');
     submittedRef.current = true;
     try {
       const response = await api<MockResult>(`/mock-attempts/${active.attemptId}/submit`, {
         method: 'POST',
-        body: JSON.stringify({ autoSubmitted })
+        body: JSON.stringify({
+          autoSubmitted,
+          cheatingSuspected: autoSubmitted && Boolean(cheatingReason),
+          cheatingReason
+        })
       });
       setResult(response);
       setTimer(0);
       localStorage.removeItem(ACTIVE_MOCK_ATTEMPT_KEY);
+      window.dispatchEvent(new Event('pkh-mock-attempt-updated'));
+      await document.exitFullscreen?.().catch(() => {});
     } catch (err) {
       submittedRef.current = false;
       setError(err instanceof Error ? err.message : 'Could not submit mock test');
@@ -120,9 +162,23 @@ export default function MockTests() {
 
   return (
     <div className="space-y-5">
+      <ProctoringWarning warning={proctoring.warning} locked={proctoring.locked} />
+      {active && !result && <WebcamMonitor enabled={Boolean(active.webcamEnabled)} onIssue={proctoring.logViolation} />}
+      {pendingTest && (
+        <TestDeclaration
+          testTitle={pendingTest.title}
+          accepted={declarationAccepted}
+          webcamEnabled={webcamEnabled}
+          onAcceptedChange={setDeclarationAccepted}
+          onWebcamEnabledChange={setWebcamEnabled}
+          onStart={() => startTest(pendingTest)}
+          onCancel={() => setPendingTest(null)}
+          loading={loadingId === pendingTest.id}
+        />
+      )}
       <div>
         <h1 className="text-2xl font-bold">Mock Tests</h1>
-        <p className="text-sm text-slate-500">Timed tests with selected coding questions, auto-submit, and instant results.</p>
+        <p className="text-sm text-slate-500">Timed tests with selected coding questions, proctoring warnings, auto-submit, and instant results.</p>
       </div>
 
       {error && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
@@ -132,9 +188,13 @@ export default function MockTests() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 p-4">
             <div>
               <div className="text-lg font-bold">{active.test.title}</div>
-              <div className="text-sm text-slate-500">{active.questions.length} questions · solve each question, then return here to submit the test</div>
+              <div className="text-sm text-slate-500">{active.questions.length} questions · full-screen proctored mode · 2 warnings, 3rd violation auto-submits</div>
             </div>
             <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 rounded-md bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-700">
+                <ShieldCheck size={18} />
+                Proctored
+              </div>
               <div className={`flex items-center gap-2 rounded-md px-3 py-2 font-bold ${timer < 300 ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-brand'}`}>
                 <Clock size={18} />
                 {formatTime(timer)}
@@ -174,6 +234,14 @@ export default function MockTests() {
               Back to Tests
             </button>
           </div>
+          {result.cheatingSuspected && (
+            <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+              <div className="flex items-center gap-2 font-black"><AlertTriangle size={18} /> Auto-submitted for admin review</div>
+              <p className="mt-1">Your test was automatically submitted due to repeated rule violations.</p>
+              <p className="mt-1 font-semibold">Reason: {result.cheatingReason || 'Repeated proctoring rule violations.'}</p>
+              <p className="mt-1">Total violations: {result.violationCount || 3}</p>
+            </div>
+          )}
           <div className="mt-4 grid gap-2">
             {result.results.map((item) => (
               <div key={item.questionId} className="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2 text-sm">
@@ -194,7 +262,11 @@ export default function MockTests() {
             <div className="panel p-5" key={test.id}>
               <div className="mb-2 text-lg font-bold">{test.title}</div>
               <div className="text-sm text-slate-500">{test.duration_minutes} minutes</div>
-              <button className="btn btn-primary mt-5 w-full" disabled={loadingId === test.id} onClick={() => startTest(test)}>
+              <div className="mt-3 rounded-md bg-slate-50 px-3 py-2 text-xs font-semibold text-slate-600">
+                <Download size={14} className="mr-1 inline" />
+                Includes full-screen, tab-switch, shortcut, and suspicious activity checks.
+              </div>
+              <button className="btn btn-primary mt-5 w-full" disabled={loadingId === test.id} onClick={() => requestStart(test)}>
                 <PlayCircle size={16} />
                 {loadingId === test.id ? 'Starting...' : 'Start'}
               </button>
