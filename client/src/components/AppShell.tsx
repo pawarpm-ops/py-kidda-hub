@@ -193,7 +193,7 @@ export default function AppShell() {
           window.setTimeout(() => setToast(null), 3500);
         }
       }
-      setNotifications(result.notifications.slice(0, 5));
+      setNotifications(result.notifications.filter((item) => !item.isRead).slice(0, 5));
       setUnreadCount(result.unreadCount);
     } catch {
       // Keep navigation usable if notification loading fails.
@@ -209,6 +209,14 @@ export default function AppShell() {
 
   async function markNotificationRead(id: string) {
     await api(`/notifications/${id}/read`, { method: 'POST' });
+    loadNotifications(false);
+  }
+
+  async function markAllNotificationsRead() {
+    await api('/notifications/read-all', { method: 'POST' });
+    setUnreadCount(0);
+    setNotifications([]);
+    setToast(null);
     loadNotifications(false);
   }
 
@@ -280,6 +288,9 @@ export default function AppShell() {
               <p className="mt-2 text-sm leading-5">
                 Hello everyone, my name is Siddharth Prashant Pawar, and I have created this website for practice purposes so that college students can test their Python skills and knowledge.
               </p>
+              <div className="mt-3 rounded-md bg-blue-50 px-3 py-2 text-sm font-semibold text-brand">
+                Developer and Manager Phone: 9172504205
+              </div>
             </div>
           )}
         </div>
@@ -397,13 +408,19 @@ export default function AppShell() {
               {showNotifications && (
                 <div className="absolute right-0 top-full z-30 mt-2 w-[min(360px,calc(100vw-2rem))] rounded-lg border border-slate-200 bg-white p-2 shadow-panel">
                   <div className="flex items-center justify-between px-2 py-2">
-                    <div className="font-bold">Notifications</div>
-                    <button className="text-xs font-bold text-brand" onClick={() => { setShowNotifications(false); navigate('/notifications'); }}>View All</button>
+                    <div>
+                      <div className="font-bold">New Notifications</div>
+                      <div className="text-xs text-slate-500">{unreadCount} unread</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {unreadCount > 0 && <button className="text-xs font-bold text-brand" onClick={markAllNotificationsRead}>Mark all read</button>}
+                      <button className="text-xs font-bold text-brand" onClick={() => { setShowNotifications(false); navigate('/notifications'); }}>Inbox</button>
+                    </div>
                   </div>
                   <div className="max-h-96 space-y-2 overflow-y-auto">
-                    {notifications.length === 0 && <div className="p-3 text-sm text-slate-500">No notifications</div>}
+                    {notifications.length === 0 && <div className="p-3 text-sm text-slate-500">No new notifications. Open Inbox to see older messages.</div>}
                     {notifications.map((item) => (
-                      <button key={item.id} className={`w-full rounded-lg border p-3 text-left ${item.isRead ? 'border-slate-200' : 'border-blue-200 bg-blue-50'}`} onClick={() => markNotificationRead(item.id)}>
+                      <button key={item.id} className="w-full rounded-lg border border-blue-200 bg-blue-50 p-3 text-left" onClick={() => markNotificationRead(item.id)}>
                         <div className="flex items-center gap-2">
                           <div className="truncate text-sm font-bold">{item.title}</div>
                           <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-bold ${priorityClass(item.priority)}`}>{item.priority}</span>
