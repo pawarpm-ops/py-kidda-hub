@@ -287,7 +287,7 @@ export default function Auth() {
                   Forgot Password?
                 </button>
               )}
-              <button className="btn btn-primary w-full" type="submit" disabled={loading}>
+              <button className="btn btn-primary w-full" type="submit" disabled={loading} data-login-action="primary">
                 {loading ? <Loader2 className="animate-spin" size={16} /> : <KeyRound size={16} />}
                 {mode === 'login' ? 'Login' : 'Create Account'}
               </button>
