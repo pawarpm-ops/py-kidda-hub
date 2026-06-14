@@ -214,7 +214,10 @@ export default function Auth() {
           </div>
           <div className="relative z-10 grid items-end gap-5 xl:grid-cols-[0.88fr_1.12fr]">
             <div className="pb-4">
-              <div className="inline-flex rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">Interactive Python login</div>
+              <div className="flex flex-wrap gap-2">
+                <div className="inline-flex rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-bold text-cyan-100">Interactive Python login</div>
+                <div className="inline-flex rounded-full border border-emerald-300/40 bg-emerald-300/10 px-3 py-1 text-xs font-bold text-emerald-100">Cloud sync test • Jun 14, 2026</div>
+              </div>
               <h1 className="mt-4 text-4xl font-black leading-tight tracking-normal md:text-6xl">Code. Learn. Achieve.</h1>
               <p className="mt-4 max-w-md text-base leading-7 text-slate-200">A playful coding gateway with secure Google login, OTP recovery, and your own student progress vault.</p>
             </div>
